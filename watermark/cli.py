@@ -32,6 +32,9 @@ MIN_PSNR_DB = 45.0
 # demo 用的合成测试图尺寸
 DEMO_WIDTH = 320
 DEMO_HEIGHT = 240
+# demo 默认水印文字与字号
+DEMO_TEXT = "watermark-kit demo"
+DEMO_FONT_SIZE = 28
 # serve 未实现时的占位提示
 SERVE_HINT = "watermark.api:create_app 尚未实现（Web 卡未完成），serve 暂不可用"
 
@@ -53,14 +56,14 @@ def _build_add_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--font", help="字体路径或名称")
     parser.add_argument("--size", type=int, default=36, help="字号（logo 为最大边，默认 36）")
     parser.add_argument("--opacity", type=float, default=0.25, help="不透明度 0.05..0.95（默认 0.25）")
-    parser.add_argument("--color", default="90,90,90", help="水印颜色 R,G,B（默认 90,90,90）")
+    parser.add_argument("--color", default="90,90,90", help="水印颜色 #RRGGBB 或 R,G,B（默认 90,90,90）")
     parser.add_argument("--position", default="bottom-right", help=f"九宫格锚点（默认 bottom-right，可选 {POSITIONS}）")
     parser.add_argument("--margin", type=float, default=0.03, help="边距比例（默认 0.03）")
     parser.add_argument("--offset", default="0,0", metavar="X,Y", help="像素偏移（默认 0,0）")
     parser.add_argument("--rotate", type=float, default=0.0, help="旋转角度（度）")
     parser.add_argument("--stroke", type=int, default=0, help="描边宽度（px）")
     parser.add_argument("--tile", action="store_true", help="平铺水印（仅 --text）")
-    parser.add_argument("--tile-gap", type=int, default=0, help="平铺间隔（px，暂以字号近似参与布局）")
+    parser.add_argument("--tile-gap", type=int, default=0, help="平铺间隔（px，仅 --tile，暂以字号近似参与布局）")
     parser.add_argument("--blend-space", choices=BLEND_SPACES, default="srgb", help="混合空间（默认 srgb）")
     parser.add_argument("--quality", type=int, default=None, help="JPEG 保存质量（1-95）")
     parser.add_argument("--spec-out", help="把 spec 另存到该 .wm.json 路径")
@@ -68,14 +71,29 @@ def _build_add_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="以 JSON 输出报告")
 
 
+# hex 颜色 #RRGGBB：# + 6 位十六进制
+_HEX_COLOR_LENGTH = 7
+
+
 def _parse_color(text: str) -> tuple[int, int, int]:
-    parts = text.split(",")
+    """支持 '#RRGGBB' 或 'R,G,B' 两种写法。"""
+    raw = (text or "").strip()
+    if raw.startswith("#"):
+        if len(raw) != _HEX_COLOR_LENGTH:
+            raise CliError(f"--color 需为 #RRGGBB，当前为 {text!r}")
+        try:
+            return tuple(
+                int(raw[i:i + 2], 16) for i in (1, 3, 5)
+            )  # type: ignore[return-value]
+        except ValueError:
+            raise CliError(f"--color 需为 #RRGGBB，当前为 {text!r}") from None
+    parts = raw.split(",")
     if len(parts) != 3:
-        raise CliError(f"--color 需要形如 R,G,B，当前为 {text!r}")
+        raise CliError(f"--color 需为 R,G,B 或 #RRGGBB，当前为 {text!r}")
     try:
         values = tuple(int(p.strip()) for p in parts)
     except ValueError:
-        raise CliError(f"--color 需要整数 R,G,B，当前为 {text!r}") from None
+        raise CliError(f"--color 需为整数 R,G.B，当前为 {text!r}") from None
     if any(not (0 <= v <= 255) for v in values):
         raise CliError(f"--color 分量需在 0..255，当前为 {values}")
     return values  # type: ignore[return-value]
@@ -115,6 +133,8 @@ def _run_add(args: argparse.Namespace) -> int:
             stroke_width=args.stroke,
             rotate=args.rotate,
             tile=args.tile,
+            tile_gap=args.tile_gap,
+            color=color,
         )
         spec = WatermarkSpec(layers=(layer,), blend_space=args.blend_space)
     except SpecError as exc:
@@ -431,6 +451,14 @@ def _run_batch(args: argparse.Namespace) -> int:
 
 def _build_demo_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out", default="demo", help="输出目录（默认 demo）")
+    parser.add_argument("--text", default=DEMO_TEXT, help="水印文字（默认 %(default)s）")
+    parser.add_argument("--font-size", type=int, default=DEMO_FONT_SIZE, help="字号（默认 %(default)s）")
+    parser.add_argument("--opacity", type=float, default=0.25, help="不透明度 0.05..0.95（默认 0.25）")
+    parser.add_argument("--color", default="90,90,90", help="水印颜色 #RRGGBB 或 R,G,B（默认 90,90,90）")
+    parser.add_argument("--position", default="bottom-right", help=f"九宫格锚点（默认 bottom-right，可选 {POSITIONS}）")
+    parser.add_argument("--rotate", type=float, default=0.0, help="旋转角度（度）")
+    parser.add_argument("--tile", action="store_true", help="平铺水印")
+    parser.add_argument("--tile-gap", type=int, default=0, help="平铺间隔（px，仅 --tile）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出")
 
 
@@ -464,9 +492,17 @@ def _run_demo(args: argparse.Namespace) -> int:
     original = _make_demo_image()
     original.save(original_path)
 
-    layer = Layer(kind="text", content="watermark-kit demo", opacity=0.25,
-                  position="bottom-right", font_size=28)
-    spec = WatermarkSpec(layers=(layer,), blend_space="srgb")
+    try:
+        color = _parse_color(args.color)
+        if args.tile_gap < 0:
+            raise CliError(f"--tile-gap 不能为负，当前为 {args.tile_gap}")
+        layer = Layer(kind="text", content=args.text, opacity=args.opacity,
+                      position=args.position, font_size=args.font_size,
+                      rotate=args.rotate, tile=args.tile,
+                      tile_gap=args.tile_gap, color=color)
+        spec = WatermarkSpec(layers=(layer,), blend_space="srgb")
+    except (CliError, SpecError) as exc:
+        raise CliError(f"demo 参数不合法: {exc}") from None
     report_add = pipeline.add_watermark(original_path, spec)
     report_add["output"] = str(marked_path)
     pipeline.save(report_add["image"], marked_path, spec)

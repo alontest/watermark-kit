@@ -49,7 +49,8 @@ def test_text_roundtrip_png(rgb_image, tmp_path):
               position="bottom-right", font_size=28),
     ))
     value, stats = _assert_roundtrip(spec, rgb_image, tmp_path, "png")
-    assert report_json_safe(add_watermark(rgb_image, spec))
+    from watermark.pipeline import report_to_json
+    report_to_json(add_watermark(rgb_image, spec))
 
 
 def test_tiled_roundtrip_png(rgb_image, tmp_path):
@@ -132,7 +133,50 @@ def test_report_is_json_safe(rgb_image):
     assert "image" not in text
 
 
-def report_json_safe(report):
-    from watermark.pipeline import report_to_json
-    report_to_json(report)
-    return True
+def test_custom_color_changes_watermark(rgb_image):
+    """同参数不同颜色 -> 不同的加水印结果（颜色链路真实生效）。"""
+    specs = [
+        WatermarkSpec(layers=(
+            Layer(kind="text", content="color", opacity=0.4,
+                  font_size=24, color=rgb),
+        ))
+        for rgb in ((90, 90, 90), (255, 0, 0), (0, 255, 0))
+    ]
+    reports = [add_watermark(rgb_image, s) for s in specs]
+    marked = [np.asarray(r["image"], dtype=np.float32) for r in reports]
+    # 颜色不同，结果两两不同
+    assert blend.diff_stats(marked[0], marked[1])["max"] > 0
+    assert blend.diff_stats(marked[0], marked[2])["max"] > 0
+    assert blend.diff_stats(marked[1], marked[2])["max"] > 0
+
+
+def test_custom_color_roundtrip_png(rgb_image, tmp_path):
+    """自定义色 #ff8800 加水印 -> 去水印 -> PSNR >= 45dB 且最大差 <= 1/255。"""
+    spec = WatermarkSpec(layers=(
+        Layer(kind="text", content="彩色", opacity=0.3, font_size=26,
+              color=(255, 136, 0)),
+    ))
+    _assert_roundtrip(spec, rgb_image, tmp_path, "png")
+
+
+def test_color_survives_spec_json_roundtrip():
+    """颜色随 spec 序列化往返，保证去水印时能取到同一个 C。"""
+    spec = WatermarkSpec(layers=(
+        Layer(kind="text", content="x", color=(255, 136, 0)),
+    ))
+    restored = WatermarkSpec.from_json(spec.to_json())
+    assert restored.layers[0].color == (255, 136, 0)
+
+
+def test_default_color_layer_uses_engine_default(rgb_image):
+    """color=None 的旧 spec 行为不变：仍以 (90,90,90) 混合。"""
+    spec_none = WatermarkSpec(layers=(
+        Layer(kind="text", content="d", opacity=0.3, font_size=24),
+    ))
+    spec_gray = WatermarkSpec(layers=(
+        Layer(kind="text", content="d", opacity=0.3, font_size=24,
+              color=(90, 90, 90)),
+    ))
+    a = np.asarray(add_watermark(rgb_image, spec_none)["image"], dtype=np.float32)
+    b = np.asarray(add_watermark(rgb_image, spec_gray)["image"], dtype=np.float32)
+    assert blend.diff_stats(a, b)["max"] == 0.0

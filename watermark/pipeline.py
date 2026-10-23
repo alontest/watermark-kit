@@ -11,7 +11,7 @@ from PIL import Image, ImageOps
 from watermark import blend, meta, render
 from watermark.spec import WatermarkSpec
 
-# 默认水印颜色（深灰，黑白图上都可读）
+# 单图层无自定义颜色时的默认水印色（深灰，黑白图上都可读）
 DEFAULT_COLOR = (90, 90, 90)
 # 保存 PNG 时是否保留原 alpha
 _MAX_DIM_LOG = 4  # report 里 mask 指纹只记前几位避免冗长
@@ -65,7 +65,11 @@ def _blend_layers(
     warnings: list[str] = []
     total_unrecoverable = 0.0
     for layer, mask in zip(spec.layers, masks):
-        color = np.asarray(DEFAULT_COLOR, dtype=np.float32)
+        # 加与去必须用同一个 C：颜色随 spec 持久化，正反自动一致
+        color = np.asarray(
+            layer.color if layer.color is not None else DEFAULT_COLOR,
+            dtype=np.float32,
+        )
         if reverse:
             work, unrecoverable = blend.remove_layer(work, mask, color, layer.opacity)
         else:
@@ -91,10 +95,12 @@ def _mask_short(fingerprint: str) -> str:
 def add_watermark(
     image: Image.Image | str | Path,
     spec: WatermarkSpec,
-    *,
-    color: tuple[int, int, int] = DEFAULT_COLOR,
 ) -> dict:
-    """加水印。返回 JSON 安全的 report；`image` 结果在 report["image"]。"""
+    """加水印。返回 JSON 安全的 report；`image` 结果在 report["image"]。
+
+    混合颜色按图层取自 spec（Layer.color 为 None 时用 DEFAULT_COLOR），
+    并随 spec 一起持久化，去水印时从 spec 读回同一颜色，保证可逆。
+    """
     if isinstance(image, (str, Path)):
         img, arr = _load_image_array(image)
     else:

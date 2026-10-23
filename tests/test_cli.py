@@ -236,6 +236,36 @@ def test_demo_creates_files_and_passes(tmp_path, capsys):
     assert _read_json(capsys)["conclusion"] == "✅ 往返无损"
 
 
+def test_demo_full_params_tile_rotate_color(tmp_path, capsys):
+    """验收 3：demo 平铺 + 旋转 + hex 颜色可跑通且报告 ✅。"""
+    out_dir = tmp_path / "demo3"
+    assert main([
+        "demo", "--out", str(out_dir),
+        "--tile", "--rotate", "-30", "--color", "#88ccff",
+        "--json",
+    ]) == 0
+    payload = _read_json(capsys)
+    assert payload["conclusion"] == "✅ 往返无损"
+    assert payload["mask_match"] is True
+
+
+def test_demo_custom_text_size_opacity_position(tmp_path, capsys):
+    out_dir = tmp_path / "demo4"
+    assert main([
+        "demo", "--out", str(out_dir), "--text", "机密", "--font-size", "20",
+        "--opacity", "0.3", "--position", "center", "--json",
+    ]) == 0
+    payload = _read_json(capsys)
+    assert payload["conclusion"] == "✅ 往返无损"
+
+
+def test_demo_bad_color_and_gap_exit_2(tmp_path):
+    assert main(["demo", "--out", str(tmp_path / "d5"),
+                 "--color", "#12345"]) == 2
+    assert main(["demo", "--out", str(tmp_path / "d6"),
+                 "--tile", "--tile-gap", "-4"]) == 2
+
+
 # ---------------------------------------------------------------- serve
 
 def test_serve_friendly_error_when_api_missing(capsys):

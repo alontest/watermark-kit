@@ -34,12 +34,6 @@ _FP_DISPLAY = 16
 _WEB_DIR = Path(__file__).parent / "web"
 _INDEX_HTML = _WEB_DIR / "index.html"
 
-# 引擎当前固定以默认颜色混合（remove 无 color 入口），自定义颜色仅记录
-_COLOR_NOTE = (
-    "引擎当前固定以默认颜色 (90,90,90) 混合以保证可逆还原，"
-    "自定义颜色仅记录、暂不生效"
-)
-
 
 # ---------------------------------------------------------------- 结果存储
 
@@ -187,7 +181,7 @@ def create_app() -> FastAPI:
         blend_space: str = Form("srgb"),
     ) -> dict:
         img = _load_upload_image(image)
-        color_rgb = _parse_color(color)  # 校验并记录；引擎当前固定默认色
+        color_rgb = _parse_color(color)
         for name, value in (("stroke", stroke), ("tile_gap", tile_gap)):
             _check_non_negative(name, value)
         with _temp_file_from_upload(logo) as logo_path:
@@ -196,6 +190,7 @@ def create_app() -> FastAPI:
                     kind="logo", content=logo_path, opacity=opacity,
                     position=position, margin=margin,
                     font_size=size, stroke_width=stroke, rotate=rotate,
+                    color=color_rgb,
                 )
                 notes = ["logo 图层不支持平铺，tile 参数已忽略"]
             else:
@@ -205,15 +200,14 @@ def create_app() -> FastAPI:
                     kind="text", content=text, opacity=opacity,
                     position=position, margin=margin,
                     font_size=size, stroke_width=stroke, rotate=rotate,
-                    tile=tile,
+                    tile=tile, tile_gap=tile_gap, color=color_rgb,
                 )
-                notes = [] if not tile else []  # tile_gap 提示见下
+                notes = []
                 if tile and tile_gap:
                     notes.append("tile_gap 暂以字号近似参与布局，独立间隔未生效")
             spec = WatermarkSpec(layers=(layer,), blend_space=blend_space)
             report = pipeline.add_watermark(img, spec)
 
-        notes.append(_COLOR_NOTE)
         entry = {
             "image": report["image"], "spec": spec,
             "report": report, "color": color_rgb,

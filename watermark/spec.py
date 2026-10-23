@@ -20,6 +20,19 @@ MIN_OPACITY = 0.05
 MAX_OPACITY = 0.95
 
 
+def _check_color(color: tuple[int, int, int] | None) -> None:
+    """校验 layer.color：None 或 3 个 0..255 整数。"""
+    if color is None:
+        return
+    if isinstance(color, (str, bytes)) or not isinstance(color, (tuple, list)):
+        raise SpecError(f"color 必须是 (R, G, B) 三元组或 None，当前为 {color!r}")
+    if len(color) != 3:
+        raise SpecError(f"color 必须是 3 个分量，当前为 {color!r}")
+    for v in color:
+        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255:
+            raise SpecError(f"color 分量需为 0..255 整数，当前为 {color!r}")
+
+
 class SpecError(ValueError):
     """spec 字段非法。"""
 
@@ -57,6 +70,9 @@ class Layer:
     stroke_width: int = 0
     rotate: float = 0.0
     tile: bool = False
+    tile_gap: int = 0
+    # None 表示使用引擎默认色；加水印与去水印必须用同一个 C 才可逆
+    color: tuple[int, int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("text", "logo"):
@@ -67,6 +83,12 @@ class Layer:
             raise SpecError(f"font_size 必须大于 0，当前为 {self.font_size}")
         if self.kind == "logo" and self.tile:
             raise SpecError("logo 图层不支持 tile")
+        if self.tile_gap < 0:
+            raise SpecError(f"tile_gap 不能为负，当前为 {self.tile_gap}")
+        _check_color(self.color)
+        # 统一为 tuple，保证 from_dict(列表) 与直接构造可比较
+        if self.color is not None:
+            object.__setattr__(self, "color", tuple(self.color))
         _check_layer_common(
             opacity=self.opacity,
             position=self.position,
@@ -80,6 +102,7 @@ class Layer:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["offset"] = list(self.offset)
+        d["color"] = list(self.color) if self.color is not None else None
         return d
 
     @classmethod
@@ -93,9 +116,12 @@ class Layer:
             raise SpecError(f"offset 必须是二元数组，当前为 {data.get('offset')!r}")
         kwargs = dict(data)
         kwargs["offset"] = offset
+        color = kwargs.get("color")
+        if isinstance(color, (list, tuple)) and len(color) == 3:
+            kwargs["color"] = tuple(int(c) for c in color)
         try:
             return cls(**kwargs)
-        except TypeError as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise SpecError(f"Layer 字段不合法: {exc}") from exc
 
 

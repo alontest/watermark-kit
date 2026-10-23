@@ -260,3 +260,46 @@ def test_add_fifos_at_capacity(client, rgb_png_bytes):
     for _ in range(MAX_STORE):
         client.post("/api/add", files=files, data=form)
     assert client.get(f"/api/download/{first}").status_code == 404
+
+
+def test_add_notes_no_color_disclaimer(client, rgb_png_bytes):
+    """验收 2：颜色已生效，notes 里不再出现「颜色不生效」类免责声明。"""
+    files, form = _add_form(rgb_png_bytes)
+    data = client.post("/api/add", files=files, data=form).json()
+    for note in data["notes"]:
+        assert "不生效" not in note
+        assert "仅记录" not in note
+
+
+def test_add_custom_color_differs_from_default(client, rgb_png_bytes):
+    """不同 color 的 add 结果 preview 应不同（引擎真实用了颜色）。"""
+    files1, form1 = _add_form(rgb_png_bytes, color="#5a5a5a")
+    files2, form2 = _add_form(rgb_png_bytes, color="#ff0000")
+    data1 = client.post("/api/add", files=files1, data=form1).json()
+    data2 = client.post("/api/add", files=files2, data=form2).json()
+    assert data1["preview"] != data2["preview"]
+    assert data1["color"] == [90, 90, 90]
+    assert data2["color"] == [255, 0, 0]
+
+
+def test_add_custom_color_roundtrip_psnr(client, rgb_image, rgb_png_bytes):
+    """API 端到端：自定义色 add -> remove -> compare 过阈值。"""
+    files, form = _add_form(rgb_png_bytes, color="#ff8800", opacity="0.25")
+    add = client.post("/api/add", files=files, data=form).json()
+    assert add["color"] == [255, 136, 0]
+    spec_json = client.get(
+        f"/api/download/{add['token']}", params={"as_json": 1}
+    )
+    resp = client.post(
+        "/api/remove",
+        files={"image": ("wm.png", rgb_png_bytes, "image/png")},
+        data={"spec": spec_json.text},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["report"]["mask_match"] is True
+    restored = Image.open(io.BytesIO(client.get(
+        f"/api/download/{resp.json()['token']}"
+    ).content))
+    original = np.asarray(rgb_image, dtype=np.float32)
+    value = psnr(original, np.asarray(restored, dtype=np.float32)[..., :3])
+    assert value >= 45.0, f"自定义色往返 PSNR {value:.2f} dB < 45"
