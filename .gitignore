@@ -1,2 +1,6 @@
 .worktrees/
 logs/
+.venv/
+__pycache__/
+dist/
+demo/
