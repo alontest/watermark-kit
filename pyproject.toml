@@ -14,8 +14,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.27",
 ]
 
 [project.scripts]

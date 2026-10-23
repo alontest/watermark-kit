@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>watermark-kit · 本地水印工具</title>
+<style>
+:root {
+  --bg: #12151c; --panel: #1b2029; --panel2: #232a36;
+  --border: #333c4d; --text: #e6eaf0; --dim: #8b95a7;
+  --accent: #4f8cff; --ok: #3ecf8e; --warn: #f5b04c; --err: #ef6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+}
+header { padding: 18px 24px 10px; }
+header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+header p { margin: 4px 0 0; color: var(--dim); font-size: 12px; }
+main { max-width: 1100px; margin: 0 auto; padding: 0 24px 40px; }
+.tabs { display: flex; gap: 8px; margin: 16px 0; }
+.tabs button {
+  padding: 9px 22px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); color: var(--dim); cursor: pointer; font-size: 14px;
+}
+.tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px;
+}
+.panel h2 { margin: 0 0 12px; font-size: 15px; }
+.row { margin-bottom: 12px; }
+.row label { display: block; margin-bottom: 5px; color: var(--dim); font-size: 12px; }
+.row input[type=text], .row input[type=number] {
+  width: 100%; padding: 7px 10px; background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+}
+input[type=range] { width: 100%; accent-color: var(--accent); }
+input[type=color] { width: 100%; height: 32px; border: none; background: none; cursor: pointer; }
+.val { float: right; color: var(--text); font-variant-numeric: tabular-nums; }
+.grid9 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.grid9 button {
+  padding: 8px 0; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); color: var(--dim); cursor: pointer;
+}
+.grid9 button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.switch input { accent-color: var(--accent); width: 16px; height: 16px; }
+.drop {
+  border: 2px dashed var(--border); border-radius: 10px; padding: 26px 14px;
+  text-align: center; color: var(--dim); cursor: pointer; transition: border-color .15s;
+}
+.drop.hover { border-color: var(--accent); color: var(--accent); }
+.drop.has-file { border-style: solid; color: var(--text); }
+.drop .fname { color: var(--text); word-break: break-all; }
+.btns { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.btns button {
+  flex: 1; padding: 9px 0; border: none; border-radius: 8px;
+  background: var(--accent); color: #fff; cursor: pointer; font-size: 13px;
+}
+.btns button.secondary { background: var(--panel2); border: 1px solid var(--border); }
+.btns button:disabled { opacity: .45; cursor: not-allowed; }
+.preview-box {
+  min-height: 320px; display: flex; align-items: center; justify-content: center;
+  background: var(--panel2); border-radius: 10px; overflow: hidden;
+}
+.preview-box img { max-width: 100%; max-height: 70vh; display: block; }
+.preview-box .ph { color: var(--dim); }
+.metrics {
+  margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.metric { background: var(--panel2); border-radius: 8px; padding: 9px 12px; }
+.metric .k { color: var(--dim); font-size: 11px; }
+.metric .v { font-size: 14px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.v.ok { color: var(--ok); } .v.warn { color: var(--warn); } .v.err { color: var(--err); }
+.report { margin-top: 12px; font-size: 12px; }
+.report ul { margin: 6px 0 0; padding-left: 18px; color: var(--dim); }
+.report li.warn { color: var(--warn); }
+.report li.err { color: var(--err); }
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: var(--err); color: #fff; padding: 10px 20px; border-radius: 8px;
+  display: none; max-width: 80vw; font-size: 13px; z-index: 10;
+}
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>watermark-kit</h1>
+  <p>全程本地运行，图片不会离开这台机器</p>
+</header>
+<main>
+  <div class="tabs">
+    <button id="tab-add" class="active">加水印</button>
+    <button id="tab-remove">去水印</button>
+  </div>
+
+  <!-- ============ 加水印 ============ -->
+  <section id="page-add">
+    <div class="layout">
+      <div class="panel">
+        <h2>参数</h2>
+        <div class="row">
+          <label>水印图片</label>
+          <div class="drop" id="drop-add">拖拽图片到这里，或点击选择</div>
+        </div>
+        <div class="row">
+          <label>水印文字</label>
+          <input type="text" id="f-text" value="© 示例水印">
+        </div>
+        <div class="row">
+          <label>字号 <span class="val" id="v-size">36</span></label>
+          <input type="range" id="f-size" min="10" max="200" value="36">
+        </div>
+        <div class="row">
+          <label>不透明度 <span class="val" id="v-opacity">0.25</span></label>
+          <input type="range" id="f-opacity" min="5" max="95" value="25">
+        </div>
+        <div class="row">
+          <label>边距比例 <span class="val" id="v-margin">0.03</span></label>
+          <input type="range" id="f-margin" min="0" max="20" value="3">
+        </div>
+        <div class="row">
+          <label>颜色</label>
+          <input type="color" id="f-color" value="#5a5a5a">
+        </div>
+        <div class="row">
+          <label>位置（九宫格）</label>
+          <div class="grid9" id="f-position"></div>
+        </div>
+        <div class="row">
+          <label>旋转（度） <span class="val" id="v-rotate">0</span></label>
+          <input type="range" id="f-rotate" min="-180" max="180" value="0">
+        </div>
+        <div class="row">
+          <label>描边宽度（px） <span class="val" id="v-stroke">0</span></label>
+          <input type="range" id="f-stroke" min="0" max="10" value="0">
+        </div>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="f-tile"> 平铺水印
+          </label>
+        </div>
+        <div class="row">
+          <label>混合空间</label>
+          <select id="f-blend" class="row" style="width:100%;padding:7px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+            <option value="srgb">sRGB</option>
+            <option value="linear">linear（线性光）</option>
+          </select>
+        </div>
+        <div class="btns">
+          <button id="btn-dl-png" disabled>下载 PNG</button>
+          <button id="btn-dl-json" class="secondary" disabled>下载配方 JSON</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>预览</h2>
+        <div class="preview-box"><span class="ph" id="ph-add">上传图片后在此预览</span>
+          <img id="preview-add" class="hidden" alt="加水印预览"></div>
+        <div class="metrics" id="metrics-add"></div>
+        <div class="report" id="report-add"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 去水印 ============ -->
+  <section id="page-remove" class="hidden">
+    <div class="layout">
+      <div class="panel">
+        <h2>操作</h2>
+        <div class="row">
+          <label>带水印图片</label>
+          <div class="drop" id="drop-remove">拖拽图片到这里，或点击选择</div>
+        </div>
+        <div class="row">
+          <label>配方 JSON（元数据里没有配方时必须提供）</label>
+          <input type="file" id="f-spec" accept=".json,application/json">
+        </div>
+        <div class="btns">
+          <button id="btn-remove" disabled>执行去水印</button>
+        </div>
+        <div class="report" id="inspect-box"></div>
+      </div>
+      <div class="panel">
+        <h2>还原结果</h2>
+        <div class="preview-box"><span class="ph" id="ph-remove">执行去水印后在此预览</span>
+          <img id="preview-remove" class="hidden" alt="去水印预览"></div>
+        <div class="metrics" id="metrics-remove"></div>
+        <div class="report" id="report-remove"></div>
+        <div class="btns">
+          <button id="btn-dl-restored" disabled>下载还原图 PNG</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const DEBOUNCE_MS = 150;
+let addToken = null, removeToken = null;
+let addTimer = null;
+let addFile = null, removeFile = null;
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.display = "none"; }, 4000);
+}
+
+async function api(path, form) {
+  const res = await fetch(path, { method: "POST", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || ("请求失败: " + res.status));
+  return data;
+}
+
+// ---------- 标签页切换 ----------
+function switchTab(name) {
+  $("tab-add").classList.toggle("active", name === "add");
+  $("tab-remove").classList.toggle("active", name === "remove");
+  $("page-add").classList.toggle("hidden", name !== "add");
+  $("page-remove").classList.toggle("hidden", name !== "remove");
+}
+$("tab-add").onclick = () => switchTab("add");
+$("tab-remove").onclick = () => switchTab("remove");
+
+// ---------- 拖拽上传 ----------
+function setupDrop(dropId, onFile) {
+  const el = $(dropId);
+  const pick = () => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = () => input.files[0] && onFile(input.files[0]);
+    input.click();
+  };
+  el.onclick = pick;
+  el.ondragover = (e) => { e.preventDefault(); el.classList.add("hover"); };
+  el.ondragleave = () => el.classList.remove("hover");
+  el.ondrop = (e) => {
+    e.preventDefault(); el.classList.remove("hover");
+    const f = e.dataTransfer.files[0];
+    if (f) onFile(f);
+  };
+}
+function markFile(dropId, file) {
+  const el = $(dropId);
+  el.classList.add("has-file");
+  el.innerHTML = '<div class="fname">✔ ' + file.name + "</div>点击可更换";
+}
+
+// ---------- 九宫格 ----------
+const POSITIONS = [
+  "top-left", "top-center", "top-right",
+  "middle-left", "center", "middle-right",
+  "bottom-left", "bottom-center", "bottom-right",
+];
+const POS_LABEL = { "top-left":"◤","top-center":"▲","top-right":"◥","middle-left":"◀","center":"◆","middle-right":"▶","bottom-left":"◣","bottom-center":"▼","bottom-right":"◢" };
+(function initGrid() {
+  const grid = $("f-position");
+  POSITIONS.forEach((p, i) => {
+    const b = document.createElement("button");
+    b.dataset.pos = p; b.textContent = POS_LABEL[p]; b.title = p;
+    if (p === "bottom-right") b.classList.add("active");
+    b.onclick = () => {
+      grid.querySelectorAll("button").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      scheduleAdd();
+    };
+    grid.appendChild(b);
+  });
+})();
+
+// ---------- 加水印 ----------
+function addParams() {
+  return {
+    text: $("f-text").value,
+    size: $("f-size").value,
+    opacity: ($("f-opacity").value / 100).toFixed(2),
+    margin: ($("f-margin").value / 100).toFixed(2),
+    color: $("f-color").value,
+    position: document.querySelector("#f-position button.active").dataset.pos,
+    rotate: $("f-rotate").value,
+    stroke: $("f-stroke").value,
+    tile: $("f-tile").checked,
+    blend_space: $("f-blend").value,
+  };
+}
+
+function buildAddForm() {
+  if (!addFile) return null;
+  const fd = new FormData();
+  fd.append("image", addFile);
+  const p = addParams();
+  for (const [k, v] of Object.entries(p)) fd.append(k, v);
+  return fd;
+}
+
+function renderMetrics(container, report, extra) {
+  const items = [];
+  if (extra) items.push(...extra);
+  if (report) {
+    if (report.mask_match !== undefined) {
+      items.push({ k: "mask 指纹匹配", v: report.mask_match ? "✔ 一致" : "✘ 不一致",
+        cls: report.mask_match ? "ok" : "err" });
+    }
+    if (report.mask_sha256) {
+      items.push({ k: "mask 指纹", v: report.mask_sha256.slice(0, 16) + "…" });
+    }
+    if (report.unrecoverable_ratio !== undefined) {
+      const pct = (report.unrecoverable_ratio * 100).toFixed(2) + "%";
+      items.push({ k: "不可逆像素占比", v: pct, cls: report.unrecoverable_ratio > 0 ? "warn" : "ok" });
+    }
+    items.push({ k: "图层数", v: report.layers });
+    items.push({ k: "尺寸", v: report.width + "×" + report.height });
+    items.push({ k: "混合空间", v: report.blend_space });
+  }
+  container.innerHTML = items.map(m =>
+    '<div class="metric"><div class="k">' + m.k + '</div><div class="v ' +
+    (m.cls || "") + '">' + m.v + "</div></div>").join("");
+}
+
+function renderReport(container, warnings) {
+  if (!warnings || !warnings.length) { container.innerHTML = ""; return; }
+  container.innerHTML = "<div>警告</div><ul>" +
+    warnings.map(w => '<li class="warn">' + w + "</li>").join("") + "</ul>";
+}
+
+async function runAdd() {
+  const fd = buildAddForm();
+  if (!fd) return;
+  try {
+    const data = await api("/api/add", fd);
+    addToken = data.token;
+    $("ph-add").classList.add("hidden");
+    const img = $("preview-add");
+    img.src = data.preview; img.classList.remove("hidden");
+    renderMetrics($("metrics-add"), data.report, [
+      { k: "下载可用", v: "token " + data.token.slice(0, 8) + "…", cls: "ok" },
+    ]);
+    renderReport($("report-add"), data.report.warnings);
+    $("btn-dl-png").disabled = false;
+    $("btn-dl-json").disabled = false;
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function scheduleAdd() {
+  $("v-size").textContent = $("f-size").value;
+  $("v-opacity").textContent = ($("f-opacity").value / 100).toFixed(2);
+  $("v-margin").textContent = ($("f-margin").value / 100).toFixed(2);
+  $("v-rotate").textContent = $("f-rotate").value;
+  $("v-stroke").textContent = $("f-stroke").value;
+  if (!addFile) return;
+  clearTimeout(addTimer);
+  addTimer = setTimeout(runAdd, DEBOUNCE_MS);
+}
+
+setupDrop("drop-add", (f) => { addFile = f; markFile("drop-add", f); runAdd(); });
+["f-text", "f-size", "f-opacity", "f-margin", "f-color", "f-rotate",
+ "f-stroke", "f-tile", "f-blend"].forEach(id => {
+  $(id).addEventListener("input", scheduleAdd);
+  $(id).addEventListener("change", scheduleAdd);
+});
+
+function triggerDownload(token, asJson) {
+  const url = "/api/download/" + token + (asJson ? "?as_json=1" : "");
+  const a = document.createElement("a");
+  a.href = url; a.download = "";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+$("btn-dl-png").onclick = () => addToken && triggerDownload(addToken, false);
+$("btn-dl-json").onclick = () => addToken && triggerDownload(addToken, true);
+
+// ---------- 去水印 ----------
+let inspectSpec = null;
+
+setupDrop("drop-remove", async (f) => {
+  removeFile = f;
+  markFile("drop-remove", f);
+  $("btn-remove").disabled = false;
+  await runInspect(f);
+});
+
+async function runInspect(file) {
+  $("inspect-box").innerHTML = "<div>正在读取配方…</div>";
+  const fd = new FormData();
+  fd.append("image", file);
+  try {
+    const data = await api("/api/inspect", fd);
+    inspectSpec = data.spec;
+    const layers = data.layers.map(l =>
+      '<li>[' + l.index + "] " + (l.kind === "text" ? "文字" : "logo") +
+      " “" + l.content + "” · 不透明度 " + l.opacity +
+      " · 位置 " + l.position + " · 字号 " + l.font_size + "</li>").join("");
+    $("inspect-box").innerHTML =
+      "<div>✔ 找到内嵌配方（" + data.format + " " + data.width + "×" + data.height +
+      "，混合空间 " + data.blend_space + "）</div><ul>" + layers + "</ul>";
+  } catch (err) {
+    inspectSpec = null;
+    $("inspect-box").innerHTML =
+      '<div class="warn" style="color:var(--warn)">⚠ ' + err.message +
+      '<br>请在左侧上传配方 JSON 文件后执行去水印。</div>';
+  }
+}
+
+$("btn-remove").onclick = async () => {
+  if (!removeFile) return;
+  const fd = new FormData();
+  fd.append("image", removeFile);
+  const specFile = $("f-spec").files[0];
+  if (specFile) {
+    fd.append("spec", await specFile.text());
+  } else if (inspectSpec) {
+    fd.append("spec", JSON.stringify(inspectSpec));
+  }
+  try {
+    const data = await api("/api/remove", fd);
+    removeToken = data.token;
+    $("ph-remove").classList.add("hidden");
+    const img = $("preview-remove");
+    img.src = data.preview; img.classList.remove("hidden");
+    renderMetrics($("metrics-remove"), data.report);
+    renderReport($("report-remove"), data.report.warnings);
+    $("btn-dl-restored").disabled = false;
+  } catch (err) {
+    toast(err.message);
+  }
+};
+
+$("btn-dl-restored").onclick = () => removeToken && triggerDownload(removeToken, false);
+</script>
+</body>
+</html>
