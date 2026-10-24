@@ -1,4 +1,4 @@
-"""Web API 测试：TestClient 走 add -> download -> remove 往返。"""
+"""Web API 测试：登录后 TestClient 走 add -> download -> remove 往返。"""
 
 from __future__ import annotations
 
@@ -9,13 +9,16 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from watermark.api import MAX_STORE, _ResultStore, create_app
+from watermark.api import MAX_STORE, _ResultStore
+from watermark.auth import COOKIE_NAME, encode_session
 from watermark.blend import psnr
 
 
+
 @pytest.fixture()
-def client():
-    return TestClient(create_app())
+def client(auth_client):
+    """已登录客户端；鉴权本身由 test_auth.py 与下方登录用例覆盖。"""
+    return auth_client
 
 
 def _png_bytes(img: Image.Image) -> bytes:
@@ -42,6 +45,15 @@ def test_health(client):
     data = client.get("/api/health").json()
     assert data["ok"] is True
     assert "version" in data
+    assert data["auth"] is True
+
+
+def test_health_reports_auth_false_when_unconfigured(auth_app):
+    from fastapi.testclient import TestClient
+
+    data = TestClient(auth_app).get("/api/health").json()
+    assert data["auth"] is False
+    assert set(data) == {"ok", "version", "auth"}, "健康检查不得泄露细节"
 
 
 # ---------------------------------------------------------------- add

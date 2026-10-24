@@ -1,4 +1,4 @@
-"""命令行入口：watermark add/remove/inspect/compare/batch/demo/serve。
+"""命令行入口：watermark add/remove/inspect/compare/batch/demo/serve/auth。
 
 argparse 实现，`main(argv=None) -> int` 供 tests 和 console script 调用；
 所有报告类子命令支持 --json 输出。
@@ -7,6 +7,7 @@ argparse 实现，`main(argv=None) -> int` 供 tests 和 console script 调用�
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from watermark import __version__, blend, meta, pipeline
+from watermark import __version__, auth, blend, meta, pipeline
 from watermark.pipeline import report_to_json
 from watermark.render import hash_masks, render_spec_masks
 from watermark.spec import (
@@ -37,6 +38,12 @@ DEMO_TEXT = "watermark-kit demo"
 DEMO_FONT_SIZE = 28
 # serve 未实现时的占位提示
 SERVE_HINT = "watermark.api:create_app 尚未实现（Web 卡未完成），serve 暂不可用"
+# 未配置口令时绑定非回环地址的拒绝提示
+SERVE_AUTH_HINT = (
+    "未配置访问密码，拒绝绑定非回环地址 {host}。\n"
+    "请先执行 `watermark auth set-password` 设置密码，"
+    "或设置 WATERMARK_PASSWORD 环境变量；仅本机使用请用 --host 127.0.0.1。"
+)
 
 IMG_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
@@ -554,12 +561,18 @@ def _build_serve_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def _run_serve(args: argparse.Namespace) -> int:
-    """转发给后续 Web 卡的 watermark.api:create_app；未实现时给友好提示。"""
+    """启动 Web 服务；非回环绑定且未配置口令时拒绝启动。"""
     try:
-        from watermark.api import create_app  # noqa: F401
+        from watermark.api import create_app
     except ImportError:
         print(SERVE_HINT, file=sys.stderr)
         return 2
+
+    service = auth.AuthService()
+    if not service.is_configured and not auth.is_loopback_host(args.host):
+        print(SERVE_AUTH_HINT.format(host=args.host), file=sys.stderr)
+        return 2
+
     import threading
     import webbrowser
 
@@ -570,8 +583,74 @@ def _run_serve(args: argparse.Namespace) -> int:
             1.0, webbrowser.open,
             args=(f"http://{args.host}:{args.port}",),
         ).start()
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(create_app(service), host=args.host, port=args.port, log_level="info")
     return 0
+
+
+# ---------------------------------------------------------------- auth
+
+def _build_auth_parser(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="auth_command", required=True)
+    set_pw = sub.add_parser("set-password", help="设置访问密码（交互输入，不回显）")
+    set_pw.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    status = sub.add_parser("status", help="查看是否已配置访问密码")
+    status.add_argument("--json", action="store_true", help="以 JSON 输出")
+
+
+def _read_password_twice() -> str:
+    """交互读取两次密码；非 TTY 时明确报错而不是读空。"""
+    if not sys.stdin.isatty():
+        raise CliError("设置密码需要交互式终端；非交互场景请用 WATERMARK_PASSWORD 环境变量")
+    first = getpass.getpass("设置访问密码（至少 8 位）: ")
+    second = getpass.getpass("再次输入确认: ")
+    if first != second:
+        raise CliError("两次输入的密码不一致")
+    return first
+
+
+def _run_auth_set_password(args: argparse.Namespace) -> int:
+    service = auth.AuthService()
+    if service.uses_env_password:
+        raise CliError("已通过 WATERMARK_PASSWORD 提供口令，无需再写入凭据文件")
+    password = _read_password_twice()
+    service.set_password(password)
+    payload = {
+        "ok": True,
+        "configured": True,
+        "path": str(service.path),
+        "mode": service.status()["mode_text"],
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"访问密码已设置: {service.path}（权限 {payload['mode']}）")
+        print("已有会话已全部失效，请重新登录。")
+    return 0
+
+
+def _run_auth_status(args: argparse.Namespace) -> int:
+    payload = auth.AuthService().status()
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if payload["configured"]:
+        source = "WATERMARK_PASSWORD 环境变量" if payload["source"] == "env" else "凭据文件"
+        print(f"访问密码: 已配置（来源: {source}）")
+    else:
+        print("访问密码: 未配置")
+    print(f"凭据文件: {payload['path']}")
+    if payload["exists"]:
+        perm = "正常" if payload["permission_ok"] else "异常，应为 0600"
+        print(f"文件权限: {payload['mode_text']}（{perm}）")
+    else:
+        print("文件权限: 文件不存在")
+    return 0
+
+
+def _run_auth(args: argparse.Namespace) -> int:
+    if args.auth_command == "set-password":
+        return _run_auth_set_password(args)
+    return _run_auth_status(args)
 
 
 # ---------------------------------------------------------------- main
@@ -611,6 +690,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="启动本地 Web 界面")
     _build_serve_parser(serve_parser)
     serve_parser.set_defaults(func=_run_serve)
+
+    auth_parser = subparsers.add_parser("auth", help="管理 Web 访问密码")
+    _build_auth_parser(auth_parser)
+    auth_parser.set_defaults(func=_run_auth)
 
     return parser
 

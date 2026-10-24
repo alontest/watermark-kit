@@ -1,7 +1,11 @@
-"""FastAPI 本地 Web 界面：拖拽上传 -> 加/去水印 -> 预览 -> 下载。
+"""FastAPI 本地 Web 界面：口令登录 -> 拖拽上传 -> 加/去水印 -> 预览 -> 下载。
 
 全程本地运行，上传的图片只存在内存里；全分辨率结果按 token 存于
 进程内 FIFO 字典（容量上限 MAX_STORE，超出淘汰最旧条目）。
+
+鉴权是单用户口令 + 签名 Cookie 会话，实现在 ``watermark.auth``；
+本模块只做请求/响应适配：``/``、``/api/*`` 受保护，``/login``、
+``POST /api/login``、``/api/health`` 公开。
 """
 
 from __future__ import annotations
@@ -15,13 +19,14 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from PIL import Image, ImageOps
 from PIL import UnidentifiedImageError
 
-from watermark import __version__, meta, pipeline
+from watermark import __version__, auth, meta, pipeline
 from watermark.spec import BLEND_SPACES, POSITIONS, Layer, WatermarkSpec
 
 # 服务端结果缓存容量（FIFO 淘汰）
@@ -33,6 +38,81 @@ _FP_DISPLAY = 16
 
 _WEB_DIR = Path(__file__).parent / "web"
 _INDEX_HTML = _WEB_DIR / "index.html"
+_LOGIN_HTML = _WEB_DIR / "login.html"
+
+# 登录失败/限流的中文提示
+_MSG_BAD_PASSWORD = "密码不正确"
+_MSG_RATE_LIMITED = "登录失败次数过多，请 5 分钟后再试"
+_MSG_LOCAL_ONLY = "只能在运行服务的本机上设置访问密码"
+_MSG_UNAUTHORIZED = "请先登录"
+
+# 会校验来源的写方法
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+
+def _is_secure_request(request: Request) -> bool:
+    """HTTPS 判定：直连 TLS，或反向代理声明 https。"""
+    if request.url.scheme == "https":
+        return True
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    return forwarded.split(",")[0].strip().lower() == "https"
+
+
+def _host_matches(origin: str, host: str) -> bool:
+    """Origin 与 Host 同源判断（只比较 host:port，忽略 scheme 差异）。"""
+    parsed = urlsplit(origin)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    origin_host = parsed.netloc.lower()
+    host = host.lower()
+    if origin_host == host:
+        return True
+    # 默认端口归一：example.com == example.com:80/443
+    default_port = "443" if parsed.scheme == "https" else "80"
+    return origin_host == f"{host}:{default_port}" or f"{origin_host}:{default_port}" == host
+
+
+def _check_same_origin(request: Request) -> bool:
+    """写请求必须有同源 Origin/Referer；两者都缺失视为不可信。"""
+    host = request.headers.get("host", "")
+    if not host:
+        return False
+    origin = request.headers.get("origin")
+    if origin and origin != "null":
+        return _host_matches(origin, host)
+    referer = request.headers.get("referer")
+    if referer:
+        return _host_matches(referer, host)
+    return False
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _session_cookie_kwargs(request: Request, max_age: int) -> dict:
+    return {
+        "key": auth.COOKIE_NAME,
+        "max_age": max_age,
+        "path": "/",
+        "httponly": True,
+        "samesite": "lax",
+        "secure": _is_secure_request(request),
+    }
+
+
+def _login_page_mode(auth_service: auth.AuthService, request: Request) -> str:
+    """页面模式：setup（首次设置）/ login / blocked（远端且尚未配置）。"""
+    if auth_service.is_configured:
+        return "login"
+    return "setup" if auth.is_loopback_host(_client_ip(request)) else "blocked"
+
+
+def _read_login_page(auth_service: auth.AuthService, request: Request) -> HTMLResponse:
+    if not _LOGIN_HTML.is_file():
+        raise HTTPException(500, "页面文件缺失: watermark/web/login.html")
+    html = _LOGIN_HTML.read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("{{MODE}}", _login_page_mode(auth_service, request)))
 
 
 # ---------------------------------------------------------------- 结果存储
@@ -143,14 +223,115 @@ def _temp_file_from_upload(upload: UploadFile | None) -> Iterator[str | None]:
 
 # ---------------------------------------------------------------- 应用
 
-def create_app() -> FastAPI:
-    """创建 FastAPI 应用。"""
+def create_app(auth_service: auth.AuthService | None = None) -> FastAPI:
+    """创建 FastAPI 应用；``auth_service`` 便于测试注入临时凭据文件。"""
+    service = auth_service if auth_service is not None else auth.AuthService()
     app = FastAPI(title="watermark-kit", version=__version__,
                   docs_url=None, redoc_url=None)
+    app.state.auth = service
 
     @app.exception_handler(ValueError)
     def _value_error_handler(request, exc: ValueError):  # noqa: ANN001
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.middleware("http")
+    async def _auth_guard(request: Request, call_next):  # noqa: ANN001
+        """统一鉴权：公开路径放行；写请求校验同源。"""
+        path = request.url.path
+        public = (
+            path == "/login"
+            or path == "/api/login"
+            or path == "/api/health"
+        )
+        if not public and not service.validate_session(
+            request.cookies.get(auth.COOKIE_NAME)
+        ):
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    status_code=401,
+                    content={"ok": False, "detail": _MSG_UNAUTHORIZED},
+                )
+            return RedirectResponse("/login", status_code=302)
+        # 鉴权之后再做 CSRF 同源校验：未登录一律 401，已登录的跨站写请求 403
+        if path.startswith("/api/") and request.method in _UNSAFE_METHODS:
+            if not _check_same_origin(request):
+                return JSONResponse(
+                    status_code=403,
+                    content={"ok": False, "detail": "跨站请求被拒绝"},
+                )
+        return await call_next(request)
+
+    def _setup_allowed(request: Request) -> bool:
+        """首次设置仅允许回环来源，避免 0.0.0.0 暴露时被抢注。"""
+        return auth.is_loopback_host(_client_ip(request))
+
+    # ------------------------------------------------ 登录
+
+    @app.get("/login")
+    def login_page(request: Request) -> Response:
+        if service.is_configured and service.validate_session(
+            request.cookies.get(auth.COOKIE_NAME)
+        ):
+            return RedirectResponse("/", status_code=302)
+        return _read_login_page(service, request)
+
+    @app.post("/api/login")
+    def api_login(
+        request: Request,
+        password: str = Form(""),
+        confirm: str = Form(""),
+    ) -> Response:
+        ip = _client_ip(request)
+        setup_mode = not service.is_configured
+        if setup_mode and not _setup_allowed(request):
+            return JSONResponse(
+                status_code=403, content={"ok": False, "detail": _MSG_LOCAL_ONLY}
+            )
+        if service.limiter.is_blocked(ip):
+            return JSONResponse(
+                status_code=429, content={"ok": False, "detail": _MSG_RATE_LIMITED}
+            )
+
+        if setup_mode:
+            if confirm and confirm != password:
+                return JSONResponse(
+                    status_code=400, content={"ok": False, "detail": "两次输入的密码不一致"}
+                )
+            error = auth.validate_password_policy(password)
+            if error:
+                return JSONResponse(
+                    status_code=400, content={"ok": False, "detail": error}
+                )
+            try:
+                service.set_password(password)
+            except auth.AuthError as exc:
+                return JSONResponse(
+                    status_code=400, content={"ok": False, "detail": str(exc)}
+                )
+        elif not service.verify(password):
+            service.limiter.record_failure(ip)
+            return JSONResponse(
+                status_code=401, content={"ok": False, "detail": _MSG_BAD_PASSWORD}
+            )
+
+        service.limiter.reset(ip)
+        response = JSONResponse(
+            content={"ok": True, "setup": setup_mode, "auth": True}
+        )
+        response.set_cookie(
+            value=service.issue_session(),
+            **_session_cookie_kwargs(request, auth.SESSION_TTL_SECONDS),
+        )
+        return response
+
+    @app.post("/api/logout")
+    def api_logout(request: Request) -> Response:
+        response = JSONResponse(content={"ok": True})
+        response.set_cookie(
+            value="",
+            **_session_cookie_kwargs(request, 0),
+        )
+        return response
 
     @app.get("/")
     def index() -> Response:
@@ -160,7 +341,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"ok": True, "version": __version__}
+        return {"ok": True, "version": __version__, "auth": service.is_configured}
 
     # ------------------------------------------------ add
 

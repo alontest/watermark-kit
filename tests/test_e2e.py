@@ -20,8 +20,9 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from watermark.api import create_app
 from watermark.blend import diff_stats, psnr
+
+from conftest import AUTH_PASSWORD, TEST_ORIGIN
 
 # 验收阈值（与 test_roundtrip.py 一致）
 MIN_PSNR_DB = 45.0
@@ -159,8 +160,15 @@ def test_cli_remove_without_spec_fails(tmp_path):
 # ---------------------------------------------------------------- API 全链路
 
 @pytest.fixture()
-def api_client():
-    return TestClient(create_app())
+def api_client(auth_service):
+    """真实登录后的客户端：先设密码，再 POST /api/login 拿会话 Cookie。"""
+    from watermark.api import create_app
+
+    auth_service.set_password(AUTH_PASSWORD)
+    client = TestClient(create_app(auth_service), headers={"Origin": TEST_ORIGIN})
+    resp = client.post("/api/login", data={"password": AUTH_PASSWORD})
+    assert resp.status_code == 200, resp.text
+    return client
 
 
 def test_api_full_roundtrip(api_client, tmp_path):

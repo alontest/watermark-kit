@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>watermark-kit · 登录</title>
+<style>
+:root {
+  --bg: #12151c; --panel: #1b2029; --panel2: #232a36;
+  --border: #333c4d; --text: #e6eaf0; --dim: #8b95a7;
+  --accent: #4f8cff; --ok: #3ecf8e; --warn: #f5b04c; --err: #ef6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px; display: flex; align-items: center; justify-content: center;
+}
+.card {
+  width: 100%; max-width: 360px; margin: 24px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 24px;
+}
+h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.sub { margin: 6px 0 20px; color: var(--dim); font-size: 12px; }
+label { display: block; margin-bottom: 5px; color: var(--dim); font-size: 12px; }
+input[type=password] {
+  width: 100%; padding: 9px 11px; margin-bottom: 14px;
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font-size: 14px;
+}
+input[type=password]:focus { outline: none; border-color: var(--accent); }
+button {
+  width: 100%; padding: 10px 0; border: none; border-radius: 8px;
+  background: var(--accent); color: #fff; cursor: pointer; font-size: 14px;
+}
+button:disabled { opacity: .5; cursor: not-allowed; }
+.msg { margin-top: 14px; font-size: 13px; min-height: 18px; }
+.msg.err { color: var(--err); }
+.msg.ok { color: var(--ok); }
+.hint { margin-top: 14px; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>watermark-kit</h1>
+  <p class="sub" id="subtitle">输入访问密码以继续</p>
+
+  <form id="login-form" autocomplete="off">
+    <label for="password" id="pw-label">访问密码</label>
+    <input type="password" id="password" name="password" required autofocus
+           autocomplete="current-password">
+
+    <div id="confirm-box" class="hidden">
+      <label for="confirm">确认密码</label>
+      <input type="password" id="confirm" name="confirm" autocomplete="new-password">
+    </div>
+
+    <button type="submit" id="submit-btn">登录</button>
+  </form>
+
+  <div class="msg" id="msg"></div>
+  <div class="hint" id="hint"></div>
+</div>
+
+<script>
+"use strict";
+const MODE = "{{MODE}}";  // "login" | "setup" | "blocked"
+const $ = (id) => document.getElementById(id);
+
+if (MODE === "setup") {
+  $("subtitle").textContent = "首次使用，请设置访问密码（仅本机可设置）";
+  $("pw-label").textContent = "设置密码（至少 8 位）";
+  $("confirm-box").classList.remove("hidden");
+  $("submit-btn").textContent = "设置并进入";
+  $("password").setAttribute("autocomplete", "new-password");
+  $("hint").textContent = "密码以 scrypt 哈希保存在本机 ~/.config/watermark-kit/auth.json（权限 0600），不会上传。";
+} else if (MODE === "blocked") {
+  $("subtitle").textContent = "尚未设置访问密码";
+  $("login-form").classList.add("hidden");
+  showMsg("只能在运行服务的本机上完成首次设置", "err");
+  $("hint").textContent = "请在服务所在机器上打开 http://127.0.0.1 完成设置，"
+    + "或先执行 watermark auth set-password / 设置 WATERMARK_PASSWORD 环境变量。";
+}
+
+function showMsg(text, cls) {
+  const el = $("msg");
+  el.textContent = text || "";
+  el.className = "msg" + (cls ? " " + cls : "");
+}
+
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const password = $("password").value;
+  if (!password) { showMsg("请输入密码", "err"); return; }
+  const fd = new FormData();
+  fd.append("password", password);
+  if (MODE === "setup") fd.append("confirm", $("confirm").value);
+
+  $("submit-btn").disabled = true;
+  showMsg("");
+  try {
+    const res = await fetch("/api/login", { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showMsg(data.detail || ("登录失败: " + res.status), "err");
+      return;
+    }
+    showMsg("登录成功，正在进入…", "ok");
+    window.location.replace("/");
+  } catch (err) {
+    showMsg("网络错误: " + err.message, "err");
+  } finally {
+    $("submit-btn").disabled = false;
+  }
+});
+</script>
+</body>
+</html>

@@ -278,6 +278,92 @@ def test_serve_friendly_error_when_api_missing(capsys):
     assert "watermark.api" in capsys.readouterr().err
 
 
+# ---------------------------------------------------------------- auth
+
+def test_auth_status_unconfigured(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert main(["auth", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "未配置" in out
+    assert "auth.json" in out
+
+
+def test_auth_status_configured_no_hash_leak(tmp_path, capsys, monkeypatch):
+    from watermark import auth
+
+    cfg_dir = tmp_path / "cfg"
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(cfg_dir))
+    auth.AuthService(path=cfg_dir / "auth.json").set_password("{{SECRET_4q3qj9pa}}")
+
+    assert main(["auth", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "已配置" in out
+    assert "0600" in out
+    assert "正常" in out
+
+    assert main(["auth", "status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configured"] is True
+    assert payload["permission_ok"] is True
+    assert set(payload) == {
+        "configured", "source", "path", "exists",
+        "mode", "mode_text", "permission_ok",
+    }
+
+
+def test_auth_set_password_requires_tty(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert main(["auth", "set-password"]) == 2
+    assert "交互式终端" in capsys.readouterr().err
+    assert not (tmp_path / "cfg" / "auth.json").exists()
+
+
+def test_auth_set_password_interactive(tmp_path, capsys, monkeypatch):
+    from watermark import auth
+
+    cfg_dir = tmp_path / "cfg"
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(cfg_dir))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    answers = iter(["{{SECRET_4q3qj9pa}}", "{{SECRET_4q3qj9pa}}"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+
+    assert main(["auth", "set-password"]) == 0
+    assert "已设置" in capsys.readouterr().out
+    path = cfg_dir / "auth.json"
+    assert path.is_file()
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    assert auth.AuthService(path=path).verify("{{SECRET_4q3qj9pa}}") is True
+
+
+def test_auth_set_password_mismatch(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    answers = iter(["{{SECRET_4q3qj9pa}}", "{{SECRET_9m2m4vqa}}"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+    assert main(["auth", "set-password"]) == 2
+    assert "不一致" in capsys.readouterr().err
+
+
+def test_auth_set_password_rejected_with_env_password(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("WATERMARK_PASSWORD", "{{SECRET_4q3qj9pa}}")
+    assert main(["auth", "set-password"]) == 2
+    assert "WATERMARK_PASSWORD" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- serve 鉴权门
+
+def test_serve_refuses_non_loopback_without_password(tmp_path, capsys, monkeypatch):
+    """非回环绑定且未配置口令：启动前直接报错退出。"""
+    monkeypatch.setenv("WATERMARK_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("WATERMARK_PASSWORD", raising=False)
+    assert main(["serve", "--host", "0.0.0.0"]) == 2
+    err = capsys.readouterr().err
+    assert "set-password" in err
+    assert "非回环" in err
+
+
 # ---------------------------------------------------------------- 杂项
 
 def test_version_flag(capsys):
