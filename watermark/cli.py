@@ -1,4 +1,4 @@
-"""命令行入口：watermark add/remove/inspect/compare/batch/demo/serve/auth。
+"""命令行入口：watermark add/remove/inspect/compare/batch/demo/serve/auth/catalog。
 
 argparse 实现，`main(argv=None) -> int` 供 tests 和 console script 调用；
 所有报告类子命令支持 --json 输出。
@@ -7,15 +7,18 @@ argparse 实现，`main(argv=None) -> int` 供 tests 和 console script 调用�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from watermark import __version__, auth, blend, meta, pipeline
+from watermark import __version__, auth, blend, catalog, meta, pipeline
 from watermark.pipeline import report_to_json
 from watermark.render import hash_masks, render_spec_masks
 from watermark.spec import (
@@ -653,6 +656,171 @@ def _run_auth(args: argparse.Namespace) -> int:
     return _run_auth_status(args)
 
 
+# ---------------------------------------------------------------- catalog
+
+# catalog list 表格各列宽度（按内容最长常见值估）
+_CATALOG_TABLE_COLUMNS = ("ID", "时间", "动作", "状态", "耗时", "源文件", "输出")
+_CATALOG_TABLE_COL_WIDTHS = (8, 19, 6, 6, 10, 24, 24)
+# prune 时间单位换算
+_MS_PER_DAY = 86_400_000
+# catalog 单条记录里跳过不展示的大字段
+_CATALOG_SUMMARY_FIELDS = ("spec_json", "params_json")
+
+
+def _build_catalog_parser(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="catalog_command", required=True)
+
+    list_p = sub.add_parser("list", help="按时间倒序列出处理记录")
+    list_p.add_argument("--limit", type=int, default=50, help="最多返回条数（默认 50）")
+    list_p.add_argument("--offset", type=int, default=0, help="跳过条数（默认 0）")
+    list_p.add_argument("--action", choices=("add", "remove"), help="只看 add 或 remove")
+    list_p.add_argument("--status", choices=("ok", "failed"), help="只看成功或失败")
+    list_p.add_argument("--json", action="store_true", help="以 JSON 输出")
+    list_p.set_defaults(func=_run_catalog_list)
+
+    show_p = sub.add_parser("show", help="查看单条记录详情")
+    show_p.add_argument("entry_id", type=int, help="记录 id")
+    show_p.add_argument("--json", action="store_true", help="以 JSON 输出")
+    show_p.set_defaults(func=_run_catalog_show)
+
+    stats_p = sub.add_parser("stats", help="档案库统计汇总")
+    stats_p.add_argument("--json", action="store_true", help="以 JSON 输出")
+    stats_p.set_defaults(func=_run_catalog_stats)
+
+    export_p = sub.add_parser("export", help="导出全部记录为 JSON 文件")
+    export_p.add_argument("dest_path", help="导出目标路径（.json 文件）")
+    export_p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    export_p.set_defaults(func=_run_catalog_export)
+
+    prune_p = sub.add_parser("prune", help="清理早于 N 天的旧记录（默认只统计不删除）")
+    prune_p.add_argument("--days", type=int, required=True, help="保留最近 N 天内的记录")
+    prune_p.add_argument("--yes", action="store_true", help="确认删除（不带则只统计）")
+    prune_p.set_defaults(func=_run_catalog_prune)
+
+
+def _format_ts_ms(ts_ms: int | None) -> str:
+    """毫秒时间戳转本地可读时间；None 返回 '-'。"""
+    if ts_ms is None:
+        return "-"
+    return datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_duration(duration_ms: int | None) -> str:
+    if duration_ms is None:
+        return "-"
+    return f"{duration_ms}ms"
+
+
+def _catalog_row_cells(entry: dict) -> list[str]:
+    return [
+        str(entry["id"]),
+        _format_ts_ms(entry["created_at"]),
+        entry["action"],
+        entry["status"],
+        _format_duration(entry["duration_ms"]),
+        entry["source_path"],
+        entry["output_path"] or "-",
+    ]
+
+
+def _print_catalog_table(rows: list[dict]) -> None:
+    headers = _CATALOG_TABLE_COLUMNS
+    widths = list(_CATALOG_TABLE_COL_WIDTHS)
+    cells = [_catalog_row_cells(entry) for entry in rows]
+    # 列宽取表头与各行内容的最大值，避免长路径截断错位
+    for i, column in enumerate(headers):
+        widths[i] = max(widths[i], len(column), *(len(row[i]) for row in cells))
+    line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    print(line)
+    print("  ".join("-" * w for w in widths))
+    for row in cells:
+        print("  ".join(c.ljust(widths[i]) for i, c in enumerate(row)))
+
+
+def _run_catalog_list(args: argparse.Namespace) -> int:
+    rows = catalog.list_entries(
+        limit=args.limit,
+        offset=args.offset,
+        action=args.action,
+        status=args.status,
+    )
+    if not rows:
+        print("档案库为空")
+        return 0
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        _print_catalog_table(rows)
+    return 0
+
+
+def _run_catalog_show(args: argparse.Namespace) -> int:
+    entry = catalog.get_entry(args.entry_id)
+    if entry is None:
+        raise CliError(f"记录不存在: id={args.entry_id}")
+    if args.json:
+        print(json.dumps(entry, ensure_ascii=False, indent=2))
+        return 0
+    for key, value in entry.items():
+        if key in _CATALOG_SUMMARY_FIELDS:
+            continue
+        if key == "created_at":
+            value = _format_ts_ms(value)
+        elif key == "duration_ms":
+            value = _format_duration(value)
+        print(f"{key}: {value}")
+    return 0
+
+
+def _run_catalog_stats(args: argparse.Namespace) -> int:
+    data = catalog.stats()
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    print(f"总条数: {data['total']}")
+    by_action = data["by_action"]
+    print(f"按动作: add={by_action.get('add', 0)}  remove={by_action.get('remove', 0)}")
+    print(f"最近一条: {_format_ts_ms(data['last_created_at'])}")
+    return 0
+
+
+def _run_catalog_export(args: argparse.Namespace) -> int:
+    try:
+        count = catalog.export_json(args.dest_path)
+    except OSError as exc:
+        raise CliError(f"导出失败: {exc}") from None
+    if args.json:
+        payload = {"count": count, "dest": str(args.dest_path)}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"已导出 {count} 条记录到 {args.dest_path}")
+    return 0
+
+
+def _run_catalog_prune(args: argparse.Namespace) -> int:
+    if args.days <= 0:
+        raise CliError(f"--days 必须大于 0，当前为 {args.days}")
+    cutoff_ms = int(time.time() * 1000) - args.days * _MS_PER_DAY
+    with contextlib.closing(catalog.init_db()) as conn:
+        if args.yes:
+            cursor = conn.execute(
+                "DELETE FROM catalog_entries WHERE created_at < ?", (cutoff_ms,)
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            print(f"已删除 {deleted} 条记录（早于 {args.days} 天）")
+        else:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM catalog_entries WHERE created_at < ?", (cutoff_ms,)
+            ).fetchone()[0]
+            print(f"将删除 {count} 条记录（早于 {args.days} 天）；加 --yes 确认执行")
+    return 0
+
+
+def _run_catalog(args: argparse.Namespace) -> int:
+    return args.func(args)
+
+
 # ---------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -694,6 +862,10 @@ def build_parser() -> argparse.ArgumentParser:
     auth_parser = subparsers.add_parser("auth", help="管理 Web 访问密码")
     _build_auth_parser(auth_parser)
     auth_parser.set_defaults(func=_run_auth)
+
+    catalog_parser = subparsers.add_parser("catalog", help="查询/导出/清理处理历史档案库")
+    _build_catalog_parser(catalog_parser)
+    catalog_parser.set_defaults(func=_run_catalog)
 
     return parser
 
