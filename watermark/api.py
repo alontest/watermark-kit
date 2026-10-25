@@ -16,7 +16,7 @@ import os
 import secrets
 import tempfile
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlsplit
@@ -505,6 +505,28 @@ def create_app(auth_service: auth.AuthService | None = None) -> FastAPI:
     def _catalog_error(status_code: int, message: str) -> JSONResponse:
         return JSONResponse(status_code=status_code, content={"error": message})
 
+    def _catalog_matched_total(
+        action: str | None, status: str | None
+    ) -> int:
+        """按与 list_entries 相同的过滤条件统计匹配总数。
+
+        单连接完成 schema 初始化与 COUNT，避免再开一套连接调 stats()。
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if action is not None:
+            clauses.append("action = ?")
+            params.append(action)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with closing(catalog.init_db()) as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM catalog_entries{where}", params
+            ).fetchone()
+        return int(row[0])
+
     @app.get("/api/catalog")
     def api_catalog(
         request: Request,
@@ -536,7 +558,7 @@ def create_app(auth_service: auth.AuthService | None = None) -> FastAPI:
             limit=limit_value, offset=offset_value, action=action, status=status
         )
         return {
-            "total": catalog.stats()["total"],
+            "total": _catalog_matched_total(action, status),
             "limit": limit_value,
             "offset": offset_value,
             "items": items,
