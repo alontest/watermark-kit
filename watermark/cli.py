@@ -671,8 +671,8 @@ def _build_catalog_parser(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="catalog_command", required=True)
 
     list_p = sub.add_parser("list", help="按时间倒序列出处理记录")
-    list_p.add_argument("--limit", type=int, default=50, help="最多返回条数（默认 50）")
-    list_p.add_argument("--offset", type=int, default=0, help="跳过条数（默认 0）")
+    list_p.add_argument("--limit", default="50", help="最多返回条数（正整数，默认 50）")
+    list_p.add_argument("--offset", default="0", help="跳过条数（不小于 0 的整数，默认 0）")
     list_p.add_argument("--action", choices=("add", "remove"), help="只看 add 或 remove")
     list_p.add_argument("--status", choices=("ok", "failed"), help="只看成功或失败")
     list_p.add_argument("--json", action="store_true", help="以 JSON 输出")
@@ -737,10 +737,25 @@ def _print_catalog_table(rows: list[dict]) -> None:
         print("  ".join(c.ljust(widths[i]) for i, c in enumerate(row)))
 
 
+def _parse_catalog_list_paging(args: argparse.Namespace) -> tuple[int, int]:
+    """解析并校验 --limit/--offset：正整数 / 非负整数，负数与非整数都报错。"""
+    try:
+        limit = int(args.limit)
+        offset = int(args.offset)
+    except ValueError:
+        raise CliError("--limit/--offset 需为整数") from None
+    if limit <= 0:
+        raise CliError(f"--limit 必须大于 0，当前为 {args.limit}")
+    if offset < 0:
+        raise CliError(f"--offset 不能为负，当前为 {args.offset}")
+    return limit, offset
+
+
 def _run_catalog_list(args: argparse.Namespace) -> int:
+    limit, offset = _parse_catalog_list_paging(args)
     rows = catalog.list_entries(
-        limit=args.limit,
-        offset=args.offset,
+        limit=limit,
+        offset=offset,
         action=args.action,
         status=args.status,
     )
