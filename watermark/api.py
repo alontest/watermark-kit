@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from PIL import Image, ImageOps
 from PIL import UnidentifiedImageError
 
-from watermark import __version__, auth, meta, pipeline
+from watermark import __version__, auth, catalog, meta, pipeline
 from watermark.spec import BLEND_SPACES, POSITIONS, Layer, WatermarkSpec
 
 # 服务端结果缓存容量（FIFO 淘汰）
@@ -48,6 +48,13 @@ _MSG_UNAUTHORIZED = "请先登录"
 
 # 会校验来源的写方法
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+# catalog 查询接口的分页与过滤边界
+_CATALOG_MIN_LIMIT = 1
+_CATALOG_MAX_LIMIT = 200
+_CATALOG_DEFAULT_LIMIT = 50
+_CATALOG_ACTIONS = frozenset({"add", "remove"})
+_CATALOG_STATUSES = frozenset({"ok", "failed"})
 
 
 def _is_secure_request(request: Request) -> bool:
@@ -167,6 +174,26 @@ def _parse_color(text: str) -> tuple[int, int, int]:
 def _check_non_negative(name: str, value: float) -> float:
     if value < 0:
         raise ValueError(f"{name} 不能为负，当前为 {value}")
+    return value
+
+
+def _catalog_limit(value: int) -> int:
+    if not _CATALOG_MIN_LIMIT <= value <= _CATALOG_MAX_LIMIT:
+        raise ValueError(
+            f"limit 需在 {_CATALOG_MIN_LIMIT}..{_CATALOG_MAX_LIMIT}，当前为 {value}"
+        )
+    return value
+
+
+def _catalog_offset(value: int) -> int:
+    if value < 0:
+        raise ValueError(f"offset 不能为负，当前为 {value}")
+    return value
+
+
+def _catalog_filter_value(name: str, value: str, allowed: frozenset[str]) -> str:
+    if value not in allowed:
+        raise ValueError(f"{name} 需为 {'/'.join(sorted(allowed))} 之一，当前为 {value!r}")
     return value
 
 
@@ -472,6 +499,59 @@ def create_app(auth_service: auth.AuthService | None = None) -> FastAPI:
             "spec": found_spec.to_dict(),
             "mask_sha256": None,  # 不渲染 mask，指纹以 remove 报告为准
         }
+
+    # ------------------------------------------------ catalog（只读查询）
+
+    def _catalog_error(status_code: int, message: str) -> JSONResponse:
+        return JSONResponse(status_code=status_code, content={"error": message})
+
+    @app.get("/api/catalog")
+    def api_catalog(
+        request: Request,
+        limit: str = Query(str(_CATALOG_DEFAULT_LIMIT)),
+        offset: str = Query("0"),
+        action: str | None = Query(None),
+        status: str | None = Query(None),
+    ) -> Response:
+        try:
+            limit_value = _catalog_limit(int(limit))
+            offset_value = _catalog_offset(int(offset))
+        except ValueError:
+            return _catalog_error(
+                400,
+                f"limit 需为 {_CATALOG_MIN_LIMIT}..{_CATALOG_MAX_LIMIT} 的整数"
+                f"（默认 {_CATALOG_DEFAULT_LIMIT}），offset 需为不小于 0 的整数",
+            )
+        if action is not None:
+            try:
+                _catalog_filter_value("action", action, _CATALOG_ACTIONS)
+            except ValueError as exc:
+                return _catalog_error(400, str(exc))
+        if status is not None:
+            try:
+                _catalog_filter_value("status", status, _CATALOG_STATUSES)
+            except ValueError as exc:
+                return _catalog_error(400, str(exc))
+        items = catalog.list_entries(
+            limit=limit_value, offset=offset_value, action=action, status=status
+        )
+        return {
+            "total": catalog.stats()["total"],
+            "limit": limit_value,
+            "offset": offset_value,
+            "items": items,
+        }
+
+    @app.get("/api/catalog/{entry_id}")
+    def api_catalog_entry(entry_id: str) -> Response:
+        try:
+            numeric_id = int(entry_id)
+        except ValueError:
+            return _catalog_error(400, f"entry_id 需为整数，当前为 {entry_id!r}")
+        entry = catalog.get_entry(numeric_id)
+        if entry is None:
+            return _catalog_error(404, "not found")
+        return entry
 
     # ------------------------------------------------ download
 
