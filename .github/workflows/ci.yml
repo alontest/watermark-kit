@@ -20,7 +20,10 @@ jobs:
       - name: Install fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-cjk
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          # tests render CJK text; watermark/fonts.py prefers DejaVu/Liberation on Linux, which lack CJK glyphs.
+          # Remove them on this ephemeral runner so the fallback picks a CJK font (workaround, not a product fix).
+          sudo rm -rf /usr/share/fonts/truetype/dejavu /usr/share/fonts/truetype/liberation
       - name: Install package
         run: python -m pip install -e ".[web,dev]"
       - name: Show resolved font
